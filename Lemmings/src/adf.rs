@@ -68,6 +68,16 @@ impl Disk {
 
     /// Return raw bytes for a named file.
     pub fn raw_file(&self, name: &str) -> Option<&[u8]> {
+        // Special case for level files (Level000..Level024)
+        if name.len() >= 8 && name[..5].eq_ignore_ascii_case("level") {
+            if let Ok(idx) = name[5..].parse::<usize>() {
+                let level_offset = 0x96BB8 + idx * 2048;
+                if level_offset + 2048 <= self.data.len() {
+                    return Some(&self.data[level_offset..level_offset + 2048]);
+                }
+            }
+        }
+
         let e = self.entries.iter()
             .find(|e| e.name.eq_ignore_ascii_case(name))?;
         self.data.get(e.offset..e.offset + e.size)
@@ -124,7 +134,7 @@ fn scan_directory(disk_bytes: &[u8], base_offset: usize, out: &mut Vec<FileEntry
         let flag = u16::from_be_bytes([chunk[10], chunk[11]]);
         let disk_off = u32::from_be_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]) as usize;
 
-        if disk_off < disk_bytes.len() {
+        if disk_off >= 0x2000 && disk_off < disk_bytes.len() {
             raw_entries.push((name, flag, disk_off));
         }
 
@@ -158,5 +168,30 @@ fn scan_directory(disk_bytes: &[u8], base_offset: usize, out: &mut Vec<FileEntry
             size,
             flag,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::Level;
+
+    #[test]
+    fn test_disk_level_loading() {
+        let d1_path = std::path::Path::new("../Lemmings_Game/Lemmings.1of2.adf");
+        let d2_path = std::path::Path::new("../Lemmings_Game/Lemmings.2of2.adf");
+        if d1_path.exists() && d2_path.exists() {
+            let disk1 = std::fs::read(d1_path).unwrap();
+            let disk2 = std::fs::read(d2_path).unwrap();
+            let disk = Disk::load(&disk1, &disk2).unwrap();
+
+            for i in 0..25 {
+                let lvl_name = format!("Level{:03}", i);
+                let data = disk.file(&lvl_name).expect(&format!("Failed to read {}", lvl_name));
+                assert_eq!(data.len(), 2048, "Level data size must be 2048 for {}", lvl_name);
+                let parsed = Level::parse(&data);
+                assert!(parsed.is_ok(), "Level::parse failed for {}: {:?}", lvl_name, parsed.err());
+            }
+        }
     }
 }
