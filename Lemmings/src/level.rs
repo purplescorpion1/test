@@ -65,9 +65,9 @@ pub struct TerrainTile {
 }
 
 impl TerrainTile {
-    pub fn flip_x(&self)       -> bool { self.modifier & 0x80 != 0 }
-    pub fn erase(&self)        -> bool { self.modifier & 0x40 != 0 }
-    pub fn no_overwrite(&self) -> bool { self.modifier & 0x20 != 0 }
+    pub fn flip_x(&self)       -> bool { self.modifier & 1 != 0 }
+    pub fn erase(&self)        -> bool { self.modifier & 2 != 0 }
+    pub fn no_overwrite(&self) -> bool { self.modifier & 4 != 0 }
 }
 
 #[derive(Debug, Clone)]
