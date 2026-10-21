@@ -1,46 +1,23 @@
 // adf.rs — Amiga ADF disk reader for Lemmings
-// The Lemmings disk uses a custom DMA Design bootblock loader.
-// There is NO ASCII index table — file offsets are embedded in M68000 code.
-// Strategy: scan both ADF images for RNC1 magic bytes to locate every
-// compressed file, read its size from the RNC header, then map files to
-// their canonical names by their order of appearance on each disk.
+// The Lemmings disk uses an AmigaDOS custom file table layout at offset 0x0400.
+// Directory entries are 16 bytes:
+//   [0..10]:  File name (ASCII, null-padded)
+//   [10..12]: Flags / reserved (0xFFFF for valid files)
+//   [12..16]: Big-endian offset into the ADF disk image
+//
 // Language: Rust, file: src/adf.rs
 
 use anyhow::{bail, Context, Result};
-use byteorder::{BigEndian, ReadBytesExt};
-use std::io::Cursor;
 
 pub const ADF_SIZE: usize = 901_120; // 80 tracks × 2 sides × 11 sectors × 512 bytes
-
-const RNC1_MAGIC: &[u8; 4] = b"RNC1";
-const RNC2_MAGIC: &[u8; 4] = b"RNC2";
-
-// ── Known file order on Lemmings Disk 1 ──────────────────────────────────────
-// Derived from community reverse engineering of the DMA Design custom loader.
-// Files appear in this order, packed sequentially after the bootblock.
-const DISK1_NAMES: &[&str] = &[
-    "main", "Code", "noises",
-    "Ground1", "Ground2", "Ground3", "Ground4", "Ground5",
-    "Objects1", "Objects2", "Objects3", "Objects4", "Objects5",
-    "Icons",
-    "Level000","Level001","Level002","Level003","Level004",
-    "Level005","Level006","Level007","Level008","Level009",
-    "Level010","Level011","Level012","Level013","Level014",
-    "Level015","Level016","Level017","Level018","Level019",
-    "Level020","Level021","Level022","Level023","Level024",
-];
-
-// ── Known file order on Lemmings Disk 2 ──────────────────────────────────────
-const DISK2_NAMES: &[&str] = &[
-    "tim1","tim2","tim3","tim4","tim5",
-    "tim6","tim7","tim8","tim9","tim10",
-];
+pub const DIR_START: usize = 0x0400;  // Sector 2 offset
 
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub name:   String,
     pub offset: usize,  // byte offset into the combined data vec
-    pub size:   usize,  // compressed byte length (as stored)
+    pub size:   usize,  // byte length as stored
+    pub flag:   u16,
 }
 
 pub struct Disk {
@@ -62,12 +39,13 @@ impl Disk {
         data.extend_from_slice(disk1);
         data.extend_from_slice(disk2);
 
-        // Scan disk1 region for RNC files
         let mut entries = Vec::new();
-        scan_rnc(&data[..ADF_SIZE], 0, DISK1_NAMES, &mut entries);
 
-        // Scan disk2 region for RNC files (offsets shifted by ADF_SIZE)
-        scan_rnc(&data[ADF_SIZE..], ADF_SIZE, DISK2_NAMES, &mut entries);
+        // Scan disk 1 directory table at 0x0400
+        scan_directory(disk1, 0, &mut entries);
+
+        // Scan disk 2 directory table at 0x0400 (base offset ADF_SIZE)
+        scan_directory(disk2, ADF_SIZE, &mut entries);
 
         log::info!("ADF scan found {} files", entries.len());
         for e in &entries {
@@ -76,7 +54,7 @@ impl Disk {
 
         if entries.is_empty() {
             bail!(
-                "No RNC-compressed files found in ADF images.\n\
+                "No directory entries found in ADF images.\n\
                  Ensure you are using the original Amiga Lemmings ADF files.\n\
                  The files must be named Lemmings.1of2.adf and Lemmings.2of2.adf."
             );
@@ -88,73 +66,97 @@ impl Disk {
     pub fn file_count(&self) -> usize { self.entries.len() }
     pub fn entries(&self)    -> &[FileEntry] { &self.entries }
 
-    /// Return raw (still-compressed) bytes for a named file.
+    /// Return raw bytes for a named file.
     pub fn raw_file(&self, name: &str) -> Option<&[u8]> {
         let e = self.entries.iter()
             .find(|e| e.name.eq_ignore_ascii_case(name))?;
         self.data.get(e.offset..e.offset + e.size)
     }
 
-    /// Decompress and return a file's bytes.
+    /// Return raw bytes for a file.
     pub fn file(&self, name: &str) -> Result<Vec<u8>> {
-        let raw = self.raw_file(name)
-            .with_context(|| format!("File '{}' not found in ADF", name))?;
-        crate::decompress::decompress(raw)
-            .with_context(|| format!("Decompression failed for '{}'", name))
+        Ok(self.file_raw(name)?)
     }
 
-    /// Return raw bytes without decompression (for already-raw assets).
+    /// Return raw bytes without decompression (assets are stored directly).
     pub fn file_raw(&self, name: &str) -> Result<Vec<u8>> {
-        Ok(self.raw_file(name)
-            .with_context(|| format!("File '{}' not found in ADF (raw)", name))?
-            .to_vec())
+        self.raw_file(name)
+            .map(|slice| slice.to_vec())
+            .with_context(|| format!("File '{}' not found in ADF", name))
     }
 }
 
-// ── RNC scanner ──────────────────────────────────────────────────────────────
+// ── Directory table scanner ──────────────────────────────────────────────────
 
-/// Walk `region` looking for RNC1/RNC2 magic bytes.
-/// Each found file is assigned the next name from `names`.
-/// `base_offset` is added to every found offset so it refers into the full
-/// combined data vec rather than just this region.
-fn scan_rnc(region: &[u8], base_offset: usize, names: &[&str], out: &mut Vec<FileEntry>) {
-    let mut pos   = 0;
-    let mut name_idx = 0;
+fn scan_directory(disk_bytes: &[u8], base_offset: usize, out: &mut Vec<FileEntry>) {
+    let mut pos = DIR_START;
+    let mut raw_entries = Vec::new();
 
-    while pos + 18 <= region.len() {
-        let magic = &region[pos..pos + 4];
-        if magic == RNC1_MAGIC || magic == RNC2_MAGIC {
-            // RNC header: [magic:4][unpacked_len:4][packed_len:4][...]
-            if pos + 12 <= region.len() {
-                let packed_len = u32::from_be_bytes([
-                    region[pos + 8],
-                    region[pos + 9],
-                    region[pos + 10],
-                    region[pos + 11],
-                ]) as usize;
-
-                let total_size = 18 + packed_len; // 18-byte header + data
-
-                if pos + total_size <= region.len() && packed_len > 0 && packed_len < ADF_SIZE {
-                    let name = if name_idx < names.len() {
-                        names[name_idx].to_string()
-                    } else {
-                        format!("file_{:03}", name_idx)
-                    };
-                    name_idx += 1;
-
-                    out.push(FileEntry {
-                        name,
-                        offset: base_offset + pos,
-                        size:   total_size,
-                    });
-
-                    // Jump past this file to avoid re-triggering on internal data
-                    pos += total_size;
-                    continue;
-                }
-            }
+    while pos + 16 <= disk_bytes.len() {
+        let chunk = &disk_bytes[pos..pos + 16];
+        if chunk == [0xFF; 16] || chunk == [0x00; 16] {
+            pos += 16;
+            continue;
         }
-        pos += 1;
+
+        // Validate name bytes (first byte must be valid printable ASCII char)
+        let first_b = chunk[0];
+        if !(first_b.is_ascii_alphanumeric() || first_b == b'.' || first_b == b'_' || first_b == b'-') {
+            break; // end of directory table
+        }
+
+        // Extract name (null-terminated / null-padded up to 10 bytes)
+        let name_bytes = &chunk[..10];
+        let null_pos = name_bytes.iter().position(|&b| b == 0).unwrap_or(10);
+        let name = match std::str::from_utf8(&name_bytes[..null_pos]) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => {
+                pos += 16;
+                continue;
+            }
+        };
+
+        if name.is_empty() {
+            pos += 16;
+            continue;
+        }
+
+        let flag = u16::from_be_bytes([chunk[10], chunk[11]]);
+        let disk_off = u32::from_be_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]) as usize;
+
+        if disk_off < disk_bytes.len() {
+            raw_entries.push((name, flag, disk_off));
+        }
+
+        pos += 16;
+    }
+
+    // Sort entries by disk offset to calculate each file's stored length
+    let mut sorted_indices: Vec<usize> = (0..raw_entries.len()).collect();
+    sorted_indices.sort_by_key(|&idx| raw_entries[idx].2);
+
+    for (rank, &orig_idx) in sorted_indices.iter().enumerate() {
+        let (ref name, flag, disk_off) = raw_entries[orig_idx];
+        let next_off = if rank + 1 < sorted_indices.len() {
+            raw_entries[sorted_indices[rank + 1]].2
+        } else {
+            // Last file extends up to end of files section / track data
+            // On Disk 1, files section ends at 0x97C00 (start of leveldata section)
+            // On Disk 2, files extend to disk end
+            if disk_bytes.len() > 0x97C00 && disk_off < 0x97C00 {
+                0x97C00
+            } else {
+                disk_bytes.len()
+            }
+        };
+
+        let size = next_off.saturating_sub(disk_off);
+
+        out.push(FileEntry {
+            name: name.clone(),
+            offset: base_offset + disk_off,
+            size,
+            flag,
+        });
     }
 }
