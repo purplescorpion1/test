@@ -71,7 +71,7 @@ impl Disk {
         // Special case for level files (Level000..Level024)
         if name.len() >= 8 && name[..5].eq_ignore_ascii_case("level") {
             if let Ok(idx) = name[5..].parse::<usize>() {
-                let level_offset = 0x9AD40 + idx * 2048;
+                let level_offset = 0x96BB8 + idx * 2048;
                 if level_offset + 2048 <= self.data.len() {
                     return Some(&self.data[level_offset..level_offset + 2048]);
                 }
