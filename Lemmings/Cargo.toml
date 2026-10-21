@@ -1,0 +1,42 @@
+[package]
+name        = "lemmings"
+version     = "1.0.0"
+edition     = "2021"
+description = "Lemmings -- Amiga ADF native Windows 11 port in Rust"
+build       = "build.rs"
+
+[[bin]]
+name = "lemmings"
+path = "src/main.rs"
+
+[dependencies]
+# Windowing + rendering
+sdl2 = { version = "0.37", features = ["mixer"] }
+
+# Byte ordering for big-endian Amiga data
+byteorder = "1.5"
+
+# Bit-stream reading (RNC decompressor)
+bitreader  = "0.3"
+
+# Error handling
+anyhow     = "1.0"
+thiserror  = "1.0"
+
+# Logging
+log        = "0.4"
+env_logger = "0.11"
+
+[build-dependencies]
+# Embeds Windows version info + manifest into the .exe
+winres = "0.1"
+
+[profile.release]
+opt-level     = 3
+lto           = true
+strip         = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1   # just enough for playable framerate in dev builds
+debug     = true

@@ -1,0 +1,17 @@
+# .cargo/config.toml — build configuration
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-L", "C:\\AI\\SDL2-VC\\lib\\x64",
+  "-L", "C:\\AI\\SDL2-Mixer\\lib\\x64",
+  "-C", "link-arg=/SUBSYSTEM:WINDOWS",
+  "-C", "link-arg=/ENTRY:mainCRTStartup"
+]
+
+[target.x86_64-pc-windows-gnu]
+linker    = "x86_64-w64-mingw32-gcc"
+rustflags = ["-C", "link-arg=-mwindows"]
+
+[env]
+SDL2_LIB_DIR       = "C:\\AI\\SDL2-VC\\lib\\x64"
+SDL2_MIXER_LIB_DIR = "C:\\AI\\SDL2-Mixer\\lib\\x64"
+SDL2_NO_PKG_CONFIG = "1"
