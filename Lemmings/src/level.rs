@@ -59,7 +59,7 @@ pub struct LevelObject {
 #[derive(Debug, Clone)]
 pub struct TerrainTile {
     pub x:        i16,
-    pub y:        i8,
+    pub y:        i16,
     pub tile_id:  u8,
     pub modifier: u8,  // flip | erase | noOverwrite flags
 }
@@ -73,7 +73,7 @@ impl TerrainTile {
 #[derive(Debug, Clone)]
 pub struct SteelArea {
     pub x:    i16,
-    pub y:    i8,
+    pub y:    i16,
     pub w:    u8,
     pub h:    u8,
 }
@@ -174,7 +174,7 @@ impl Level {
             let modifier = ((word0 >> 13) & 0x7) as u8;
             let x        = ((word0 >> 3) & 0x3FF) as i16 - 16;
             let tile_id  = ((word1 >> 8) & 0xFF) as u8;
-            let y        = (word1 & 0xFF) as i8;
+            let y        = (word1 & 0xFF) as i16;
 
             terrain.push(TerrainTile { x, y, tile_id, modifier });
         }
@@ -190,7 +190,7 @@ impl Level {
 
             // word0: x[9] | y[7]   word1: w[4] | h[4] | unused
             let x = ((word0 >> 7) & 0x1FF) as i16 * 2;
-            let y = (word0 & 0x7F) as i8 * 2;
+            let y = (word0 & 0x7F) as i16 * 2;
             let w = (((word1 >> 12) & 0xF) as u8 + 1) * 4;
             let h = (((word1 >>  8) & 0xF) as u8 + 1) * 4;
 
